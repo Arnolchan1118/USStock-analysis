@@ -50,9 +50,8 @@ xoomar_client = get_xoomar()
 
 
 # ============================================================
-# 技術面數據與圖表準備
+# 技術面數據計算
 # ============================================================
-
 @st.cache_data(ttl=3600)
 def fetch_technicals(ticker: str):
     tk = yf.Ticker(ticker)
@@ -64,7 +63,6 @@ def fetch_technicals(ticker: str):
     if len(close) < 60:
         return {"error": "歷史數據不足，至少需要約 60 個交易日"}
 
-    # 計算指標
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
@@ -127,6 +125,9 @@ def fetch_technicals(ticker: str):
         "dist_high20": dist_high20, "dist_low20": dist_low20, "range_read": range_read,
     }
 
+# ============================================================
+# 圖表數據抓取
+# ============================================================
 @st.cache_data(ttl=3600)
 def fetch_chart_data(ticker: str, timeframe: str):
     tk = yf.Ticker(ticker)
@@ -371,7 +372,7 @@ if submitted and ticker:
     result = score_and_decide(tech, opt, short)
 
     # ============================================================
-    # 專業 Plotly 陰陽燭圖表
+    # 專業 Plotly 陰陽燭圖表 (防手機誤觸版)
     # ============================================================
     st.subheader(f"📊 {ticker} 專業走勢圖")
     
@@ -383,8 +384,8 @@ if submitted and ticker:
 
     if not df_chart.empty:
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                            vertical_spacing=0.03, subplot_titles=(f'{ticker} K線', '成交量'), 
-                            row_heights=[0.75, 0.25])
+                            vertical_spacing=0.05, subplot_titles=(f'{ticker} K線', '成交量'), 
+                            row_heights=[0.7, 0.3])
 
         # 1. 陰陽燭 (紅漲綠跌)
         fig.add_trace(go.Candlestick(
@@ -398,30 +399,41 @@ if submitted and ticker:
         # 2. 均線與布林帶
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], line=dict(color='orange', width=1.5), name='MA20'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA50'], line=dict(color='blue', width=1.5), name='MA50'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(150,150,150,0.6)', width=1), name='布林上軌'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Lower'], line=dict(color='rgba(150,150,150,0.6)', width=1), fill='tonexty', fillcolor='rgba(150,150,150,0.1)', name='布林下軌'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(150,150,150,0.5)', width=1), name='布林上軌'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Lower'], line=dict(color='rgba(150,150,150,0.5)', width=1), fill='tonexty', fillcolor='rgba(150,150,150,0.1)', name='布林下軌'), row=1, col=1)
 
         # 3. 成交量
         colors = ['red' if row['Close'] >= row['Open'] else 'green' for _, row in df_chart.iterrows()]
         fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], marker_color=colors, name='成交量'), row=2, col=1)
 
-        # 美化圖表
+        # 美化圖表與鎖定手機交互
         fig.update_layout(
-            xaxis_rangeslider_visible=False, height=550,
+            height=500,
             margin=dict(l=10, r=10, t=30, b=10),
             paper_bgcolor='white', plot_bgcolor='white',
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            hovermode="x unified"
+            dragmode=False,
+            hovermode=False,
+            xaxis_rangeslider_visible=False
         )
         fig.update_xaxes(showgrid=True, gridcolor='#E5E5E5')
         fig.update_yaxes(showgrid=True, gridcolor='#E5E5E5')
         
-        st.plotly_chart(fig, use_container_width=True)
+        # 設定 staticPlot=True 及禁用工具欄，防止手機拖拽變形
+        st.plotly_chart(
+            fig, 
+            use_container_width=True,
+            config={
+                'staticPlot': True,       
+                'displayModeBar': False,  
+                'scrollZoom': False       
+            }
+        )
     else:
         st.warning("無法繪製圖表，數據為空。")
 
     # ============================================================
-    # 三大維度數據 (使用 HTML 強制深色文字)
+    # 三大維度數據
     # ============================================================
     c1, c2, c3 = st.columns(3)
 
