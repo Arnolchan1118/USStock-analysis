@@ -19,7 +19,7 @@ xoomar_client = get_xoomar()
 
 
 # ============================================================
-# 技术面（增强）
+# 技術面
 # ============================================================
 
 @st.cache_data(ttl=3600)
@@ -27,13 +27,12 @@ def fetch_technicals(ticker: str):
     tk = yf.Ticker(ticker)
     hist = tk.history(period="6mo", auto_adjust=False)
     if hist.empty or "Close" not in hist.columns:
-        return {"error": "无法获取历史数据，请检查美股代码"}
+        return {"error": "無法獲取歷史數據，請檢查美股代碼"}
     close = hist["Close"].dropna()
     volume = hist["Volume"].dropna() if "Volume" in hist.columns else None
     if len(close) < 60:
-        return {"error": "历史数据不足"}
+        return {"error": "歷史數據不足，至少需要約 60 個交易日"}
 
-    # RSI
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
@@ -41,40 +40,39 @@ def fetch_technicals(ticker: str):
     rsi = 100 - (100 / (1 + rs))
     current_rsi = float(rsi.iloc[-1])
 
-    # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     macd_hist = macd_line - signal_line
 
-    # MA
     ma20 = close.rolling(20).mean()
     ma50 = close.rolling(50).mean()
     current_price = float(close.iloc[-1])
 
-    # 布林带（20日，2倍标准差）
     std20 = close.rolling(20).std()
     bb_upper = ma20 + 2 * std20
     bb_lower = ma20 - 2 * std20
-    bb_width = float((bb_upper.iloc[-1] - bb_lower.iloc[-1]) / ma20.iloc[-1] * 100)
+    bb_width = round(float((bb_upper.iloc[-1] - bb_lower.iloc[-1]) / ma20.iloc[-1] * 100), 2)
     if current_price > float(bb_upper.iloc[-1]):
-        bb_position = "above_upper"      # 突破上轨
+        bb_position = "above_upper"
+        bb_read = "突破上軌，超買，短線回調風險較高"
     elif current_price < float(bb_lower.iloc[-1]):
-        bb_position = "below_lower"      # 跌破下轨
+        bb_position = "below_lower"
+        bb_read = "跌破下軌，超賣，短線反彈機會較高"
     elif current_price > float(ma20.iloc[-1]):
         bb_position = "upper_half"
+        bb_read = "中軌以上，偏強，但未達超買"
     else:
         bb_position = "lower_half"
+        bb_read = "中軌以下，偏弱，但未達超賣"
 
-    # 成交量比（5日/20日）
     vol_ratio = None
     if volume is not None and len(volume) >= 20:
         v5 = float(volume.iloc[-5:].mean())
         v20 = float(volume.iloc[-20:].mean())
         vol_ratio = round(v5 / v20, 2) if v20 > 0 else None
 
-    # ATR%（14日）
     high = hist["High"].dropna()
     low = hist["Low"].dropna()
     tr = pd.concat([
@@ -85,11 +83,16 @@ def fetch_technicals(ticker: str):
     atr = tr.rolling(14).mean()
     atr_pct = round(float(atr.iloc[-1] / current_price * 100), 2) if current_price > 0 else None
 
-    # 距20日高低点
     high20 = float(close.iloc[-20:].max())
     low20 = float(close.iloc[-20:].min())
     dist_high20 = round((current_price / high20 - 1) * 100, 2)
     dist_low20 = round((current_price / low20 - 1) * 100, 2)
+    if dist_high20 > -2:
+        range_read = "接近 20 日高位，強勢，但需留意獲利回吐"
+    elif dist_low20 < 2:
+        range_read = "接近 20 日低位，弱勢，但可能出現反彈"
+    else:
+        range_read = "處於 20 日區間中部"
 
     chart_df = pd.DataFrame({
         "Close": close, "MA20": ma20, "MA50": ma50,
@@ -103,22 +106,29 @@ def fetch_technicals(ticker: str):
             else "oversold" if current_rsi < 30
             else "neutral"
         ),
+        "rsi_read": (
+            "超買（>70），短線回落風險較高" if current_rsi > 70
+            else "超賣（<30），短線反彈機會較高" if current_rsi < 30
+            else "中性（30–70），無明顯超買超賣"
+        ),
         "macd_bullish_cross": bool(macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0),
         "macd_bearish_cross": bool(macd_hist.iloc[-1] < 0 and macd_hist.iloc[-2] >= 0),
         "price_above_ma20": current_price > float(ma20.iloc[-1]),
         "ma20_above_ma50": float(ma20.iloc[-1]) > float(ma50.iloc[-1]),
         "bb_position": bb_position,
         "bb_width": bb_width,
+        "bb_read": bb_read,
         "vol_ratio": vol_ratio,
         "atr_pct": atr_pct,
         "dist_high20": dist_high20,
         "dist_low20": dist_low20,
+        "range_read": range_read,
         "chart_df": chart_df,
     }
 
 
 # ============================================================
-# 期权情绪（yfinance + IV）
+# 期權情緒
 # ============================================================
 
 def _option_result(put_vol, call_vol, put_oi, call_oi, put_iv=None, call_iv=None):
@@ -127,23 +137,34 @@ def _option_result(put_vol, call_vol, put_oi, call_oi, put_iv=None, call_iv=None
 
     if vr < 0.8 and oir < 0.8:
         sentiment = "bullish"
+        sentiment_read = "強烈看多：Put 成交量及持倉量均明顯低於 Call"
     elif vr < 1.0 and oir < 1.0:
         sentiment = "mildly_bullish"
+        sentiment_read = "輕微看多：Put 略低於 Call"
     elif vr > 1.2 and oir > 1.2:
         sentiment = "bearish"
+        sentiment_read = "強烈看空：Put 成交量及持倉量均明顯高於 Call"
     elif vr > 1.0 and oir > 1.0:
         sentiment = "mildly_bearish"
+        sentiment_read = "輕微看空：Put 略高於 Call"
     else:
         sentiment = "neutral"
+        sentiment_read = "中性：成交量與持倉量信號不一致"
 
-    # 量仓背离检测
     divergence = None
     if (vr < 0.8 and oir > 1.2) or (vr > 1.2 and oir < 0.8):
-        divergence = "volume_oi_divergence"
+        divergence = "成交量與持倉量方向背離，信號可靠性較低"
 
     iv_skew = None
+    iv_read = None
     if put_iv is not None and call_iv is not None and call_iv > 0:
         iv_skew = round((put_iv - call_iv) / call_iv * 100, 2)
+        if iv_skew > 10:
+            iv_read = "Put IV 明顯高於 Call，市場願付溢價避險，看空情緒較強"
+        elif iv_skew < -10:
+            iv_read = "Call IV 明顯高於 Put，市場看多情緒較強"
+        else:
+            iv_read = "Put 與 Call IV 接近，情緒平衡"
 
     return {
         "put_volume": int(put_vol), "call_volume": int(call_vol),
@@ -151,10 +172,12 @@ def _option_result(put_vol, call_vol, put_oi, call_oi, put_iv=None, call_iv=None
         "volume_put_call_ratio": round(vr, 2) if np.isfinite(vr) else None,
         "oi_put_call_ratio": round(oir, 2) if np.isfinite(oir) else None,
         "sentiment": sentiment,
+        "sentiment_read": sentiment_read,
         "divergence": divergence,
         "put_iv": round(put_iv, 2) if put_iv is not None else None,
         "call_iv": round(call_iv, 2) if call_iv is not None else None,
         "iv_skew_pct": iv_skew,
+        "iv_read": iv_read,
     }
 
 
@@ -164,10 +187,10 @@ def fetch_option_sentiment(ticker: str, max_expiries: int = 6):
     try:
         all_expiries = list(tk.options)
     except Exception as e:
-        return {"error": f"无法读取期权到期日：{e}"}
+        return {"error": f"無法讀取期權到期日：{e}"}
 
     if not all_expiries:
-        return {"error": "此股票无期权数据（可能未上市期权或代码错误）"}
+        return {"error": "此股票無期權數據（可能未上市期權或代碼錯誤）"}
 
     expiries = all_expiries[:max_expiries]
     total_put_vol = total_call_vol = 0
@@ -198,7 +221,7 @@ def fetch_option_sentiment(ticker: str, max_expiries: int = 6):
             continue
 
     if total_call_vol == 0 and total_call_oi == 0:
-        return {"error": f"期权链数据为空。到期日：{expiries}。可能原因：期权流动性低或数据延迟。", "raw_errors": errors}
+        return {"error": f"期權鏈數據為空。到期日：{expiries}", "raw_errors": errors}
 
     put_iv = np.mean(put_ivs) if put_ivs else None
     call_iv = np.mean(call_ivs) if call_ivs else None
@@ -211,7 +234,7 @@ def fetch_option_sentiment(ticker: str, max_expiries: int = 6):
 
 
 # ============================================================
-# 沽空数据（xoomar + yfinance info 双源）
+# 沽空數據
 # ============================================================
 
 def _f(x):
@@ -224,6 +247,18 @@ def _f(x):
 def _build_short_result(spf, d2c, ss, ssp, source):
     rising = ss is not None and ssp is not None and ss > ssp * 1.05
     falling = ss is not None and ssp is not None and ss < ssp * 0.95
+
+    change_pct = None
+    if ss is not None and ssp is not None and ssp > 0:
+        change_pct = round((ss / ssp - 1) * 100, 2)
+
+    if rising:
+        change_read = f"空頭持倉較上期上升 {change_pct}%"
+    elif falling:
+        change_read = f"空頭持倉較上期下降 {abs(change_pct)}%"
+    else:
+        change_read = "空頭持倉與上期基本持平（變化在 ±5% 以內）" if change_pct is not None else "無持倉變化數據"
+
     sig = []
     if rising and (spf is None or spf >= 5):
         sig.append("short_interest_rising_bearish")
@@ -239,21 +274,36 @@ def _build_short_result(spf, d2c, ss, ssp, source):
         sig.append("days_to_cover_high_rising")
     if not sig:
         sig.append("neutral")
+
     return {
         "source": source,
         "short_pct_float": round(spf, 2) if spf is not None else None,
         "short_ratio_days_to_cover": round(d2c, 2) if d2c is not None else None,
         "shares_short": int(ss) if ss is not None else None,
         "shares_short_prior": int(ssp) if ssp is not None else None,
+        "short_change_pct": change_pct,
+        "change_read": change_read,
         "short_interest_rising": rising,
         "short_interest_falling": falling,
         "signals": sig,
     }
 
 
+SIGNAL_ZH = {
+    "neutral": "中性，無明顯沽空信號",
+    "short_interest_rising_bearish": "空頭持倉上升且 Short % of Float ≥ 5%，看空壓力增加",
+    "short_interest_rising": "空頭持倉上升（>5%）",
+    "short_covering_bullish": "Short % of Float ≥ 10% 且空頭持倉下降，空頭回補，看多",
+    "squeeze_potential": "Short % of Float ≥ 15% 且空頭持倉下降，潛在逼空",
+    "low_short_pressure": "Short % of Float < 3% 且無上升，沽空壓力有限",
+    "days_to_cover_high_rising": "Days to Cover ≥ 5 且空頭持倉上升，下跌壓力較強",
+    "daily_short_volume_rising": "每日沽空成交量上升（近 5 日較前 5 日升逾 10%）",
+    "daily_short_volume_falling": "每日沽空成交量下降（近 5 日較前 5 日跌逾 10%）",
+}
+
+
 @st.cache_data(ttl=600)
 def fetch_short_sentiment(ticker: str):
-    # 第一优先：xoomar
     if XOOMAR_OK and xoomar_client is not None:
         try:
             si_list = xoomar_client.short_interest(ticker)
@@ -273,7 +323,6 @@ def fetch_short_sentiment(ticker: str):
                 if any(v is not None for v in [spf, ss, d2c]):
                     res = _build_short_result(spf, d2c, ss, ssp, "xoomar")
 
-                    # 每日沽空量趋势
                     try:
                         sv = xoomar_client.short_volume(ticker, days=30)
                         if isinstance(sv, list) and len(sv) >= 5:
@@ -284,12 +333,24 @@ def fetch_short_sentiment(ticker: str):
                                 if len(vals) >= 5:
                                     recent = vals.iloc[:5].mean()
                                     earlier = vals.iloc[5:10].mean() if len(vals) >= 10 else vals.mean()
-                                    trend = "rising" if recent > earlier * 1.1 else "falling" if recent < earlier * 0.9 else "flat"
-                                    res["daily_short_volume_trend"] = trend
-                                    if trend == "rising":
-                                        res["signals"].append("daily_short_volume_rising")
-                                    elif trend == "falling":
-                                        res["signals"].append("daily_short_volume_falling")
+                                    change = round((recent / earlier - 1) * 100, 2) if earlier > 0 else None
+                                    if change is not None:
+                                        if change > 10:
+                                            trend = "rising"
+                                            read = f"近 5 日平均沽空量較前 5 日上升 {change}%"
+                                        elif change < -10:
+                                            trend = "falling"
+                                            read = f"近 5 日平均沽空量較前 5 日下降 {abs(change)}%"
+                                        else:
+                                            trend = "flat"
+                                            read = f"近 5 日平均沽空量與前 5 日基本持平（{change}%）"
+                                        res["daily_short_volume_trend"] = trend
+                                        res["daily_short_volume_change_pct"] = change
+                                        res["daily_short_volume_read"] = read
+                                        if trend == "rising":
+                                            res["signals"].append("daily_short_volume_rising")
+                                        elif trend == "falling":
+                                            res["signals"].append("daily_short_volume_falling")
                     except Exception:
                         pass
                     return res
@@ -298,7 +359,6 @@ def fetch_short_sentiment(ticker: str):
         except Exception:
             pass
 
-    # 第二优先：yfinance info
     try:
         info = yf.Ticker(ticker).info or {}
         spf = _f(info.get("shortPercentOfFloat"))
@@ -309,78 +369,74 @@ def fetch_short_sentiment(ticker: str):
         d2c = _f(info.get("shortRatio"))
         if any(v is not None for v in [spf, ss, d2c]):
             res = _build_short_result(spf, d2c, ss, ssp, "yfinance_info")
-            res["note"] = "数据来自 yfinance info（双周更新，可能滞后）"
+            res["note"] = "數據來自 yfinance info（雙週更新，可能滯後）"
             return res
-    except Exception as e:
+    except Exception:
         pass
 
-    return {"error": "xoomar 与 yfinance 均无法获取沽空数据", "source": None}
+    return {"error": "xoomar 與 yfinance 均無法獲取沽空數據", "source": None}
 
 
 # ============================================================
-# 综合评分（含明细）
+# 綜合評分
 # ============================================================
 
 def score_and_decide(tech, opt, short):
     b = s = sh = 0
-    details = []  # (维度, 信号, 买入, 卖出, 沽空)
+    details = []
 
-    # 技术面
     if tech["rsi_signal"] == "oversold":
-        b += 2; details.append(("技术面", "RSI 超卖", 2, 0, 0))
+        b += 2; details.append(("技術面", "RSI 超賣（<30）", 2, 0, 0))
     elif tech["rsi_signal"] == "overbought":
-        s += 2; sh += 1; details.append(("技术面", "RSI 超买", 0, 2, 1))
+        s += 2; sh += 1; details.append(("技術面", "RSI 超買（>70）", 0, 2, 1))
 
     if tech["macd_bullish_cross"]:
-        b += 2; details.append(("技术面", "MACD 金叉", 2, 0, 0))
+        b += 2; details.append(("技術面", "MACD 金叉", 2, 0, 0))
     elif tech["macd_bearish_cross"]:
-        s += 2; sh += 1; details.append(("技术面", "MACD 死叉", 0, 2, 1))
+        s += 2; sh += 1; details.append(("技術面", "MACD 死叉", 0, 2, 1))
 
     if tech["price_above_ma20"] and tech["ma20_above_ma50"]:
-        b += 2; details.append(("技术面", "价格 > MA20 > MA50", 2, 0, 0))
+        b += 2; details.append(("技術面", "價格 > MA20 > MA50（多頭排列）", 2, 0, 0))
     elif not tech["price_above_ma20"] and not tech["ma20_above_ma50"]:
-        s += 1; sh += 1; details.append(("技术面", "价格 < MA20 < MA50", 0, 1, 1))
+        s += 1; sh += 1; details.append(("技術面", "價格 < MA20 < MA50（空頭排列）", 0, 1, 1))
 
     if tech["bb_position"] == "below_lower":
-        b += 2; details.append(("技术面", "跌破布林下轨（超卖）", 2, 0, 0))
+        b += 2; details.append(("技術面", "跌破布林下軌（超賣）", 2, 0, 0))
     elif tech["bb_position"] == "above_upper":
-        s += 2; sh += 1; details.append(("技术面", "突破布林上轨（超买）", 0, 2, 1))
+        s += 2; sh += 1; details.append(("技術面", "突破布林上軌（超買）", 0, 2, 1))
 
-    if tech["vol_ratio"] is not None:
-        if tech["vol_ratio"] > 1.5 and tech["rsi_signal"] != "neutral":
-            sh += 1; details.append(("技术面", "成交量放大 + 方向明确", 0, 0, 1))
+    if tech["vol_ratio"] is not None and tech["vol_ratio"] > 1.5 and tech["rsi_signal"] != "neutral":
+        sh += 1; details.append(("技術面", "成交量放大且方向明確", 0, 0, 1))
 
-    # 期权
     if isinstance(opt, dict) and "error" not in opt:
         m = {"bullish": (3, 0, 0), "mildly_bullish": (2, 0, 0), "bearish": (0, 0, 3), "mildly_bearish": (0, 1, 2)}
         db, ds, dsh = m.get(opt["sentiment"], (0, 0, 0))
         b += db; s += ds; sh += dsh
-        details.append(("期权", f"情绪：{opt['sentiment']}", db, ds, dsh))
+        details.append(("期權", f"情緒：{opt['sentiment']}", db, ds, dsh))
 
         if opt.get("divergence"):
-            sh += 1; details.append(("期权", "成交量与持仓量背离", 0, 0, 1))
+            sh += 1; details.append(("期權", "成交量與持倉量背離", 0, 0, 1))
 
         if opt.get("iv_skew_pct") is not None:
             if opt["iv_skew_pct"] > 10:
-                sh += 1; details.append(("期权", f"Put IV 偏斜 +{opt['iv_skew_pct']}%", 0, 0, 1))
+                sh += 1; details.append(("期權", f"Put IV 偏斜 +{opt['iv_skew_pct']}%", 0, 0, 1))
             elif opt["iv_skew_pct"] < -10:
-                b += 1; details.append(("期权", f"Call IV 偏斜 {opt['iv_skew_pct']}%", 1, 0, 0))
+                b += 1; details.append(("期權", f"Call IV 偏斜 {opt['iv_skew_pct']}%", 1, 0, 0))
 
-    # 沽空
     if isinstance(short, dict) and "error" not in short:
         sig = short.get("signals", [])
         if "short_interest_rising_bearish" in sig:
-            sh += 3; s += 1; details.append(("沽空", "空头持仓上升 + 比例偏高", 0, 1, 3))
+            sh += 3; s += 1; details.append(("沽空", "空頭持倉上升 + Short % ≥ 5%", 0, 1, 3))
         if "short_interest_rising" in sig:
-            sh += 1; details.append(("沽空", "空头持仓上升", 0, 0, 1))
+            sh += 1; details.append(("沽空", "空頭持倉上升", 0, 0, 1))
         if "short_covering_bullish" in sig:
-            b += 2; details.append(("沽空", "空头回补", 2, 0, 0))
+            b += 2; details.append(("沽空", "空頭回補", 2, 0, 0))
         if "squeeze_potential" in sig:
-            b += 3; details.append(("沽空", "潜在逼空", 3, 0, 0))
+            b += 3; details.append(("沽空", "潛在逼空", 3, 0, 0))
         if "low_short_pressure" in sig:
-            b += 1; details.append(("沽空", "沽空压力低", 1, 0, 0))
+            b += 1; details.append(("沽空", "沽空壓力低", 1, 0, 0))
         if "days_to_cover_high_rising" in sig:
-            sh += 1; details.append(("沽空", "Days to Cover 高 + 上升", 0, 0, 1))
+            sh += 1; details.append(("沽空", "Days to Cover 高且上升", 0, 0, 1))
         if "daily_short_volume_rising" in sig:
             sh += 1; details.append(("沽空", "每日沽空量上升", 0, 0, 1))
         if "daily_short_volume_falling" in sig:
@@ -394,7 +450,7 @@ def score_and_decide(tech, opt, short):
         sp = round(s / total * 100, 1)
         shp = round(sh / total * 100, 1)
 
-    probs = {"买入": bp, "卖出": sp, "沽空": shp}
+    probs = {"買入": bp, "賣出": sp, "沽空": shp}
     return {
         "buy_probability": bp,
         "sell_probability": sp,
@@ -406,19 +462,22 @@ def score_and_decide(tech, opt, short):
 
 
 # ============================================================
-# 界面
+# 介面
 # ============================================================
 
 st.title("📈 美股分析工具 Pro")
-st.caption("技术面 · 期权情绪 · 沽空数据 · 综合概率 · 信号明细")
+st.caption("技術面 · 期權情緒 · 沽空數據 · 綜合概率 · 信號明細")
 
 with st.form("analysis_form"):
     col1, col2 = st.columns([2, 1])
     with col1:
-        ticker = st.text_input("美股代码", value="MU", placeholder="AAPL / TSLA / NVDA / MSFT").upper().strip()
+        ticker = st.text_input("美股代碼", value="MU", placeholder="AAPL / TSLA / NVDA / MSFT").upper().strip()
     with col2:
-        max_expiries = st.slider("期权到期日数量", 1, 12, 6, help="汇总最近 N 个到期日的 Put/Call 数据")
-    submitted = st.form_submit_button("🚀 开始分析", type="primary", use_container_width=True)
+        max_expiries = st.slider(
+            "期權到期日數量", 1, 12, 6,
+            help="汇总最近 N 個期權到期日的 Put/Call 成交量及持倉量。1=最敏感但樣本少；6=平衡；12=樣本最大但遠期流動性較差",
+        )
+    submitted = st.form_submit_button("🚀 開始分析", type="primary", use_container_width=True)
 
 if submitted and ticker:
     with st.spinner("分析中…"):
@@ -427,104 +486,112 @@ if submitted and ticker:
         st.error(f"❌ {tech['error']}")
         st.stop()
 
-    with st.spinner("抓取期权及沽空数据…"):
+    with st.spinner("抓取期權及沽空數據…"):
         opt = fetch_option_sentiment(ticker, max_expiries)
         short = fetch_short_sentiment(ticker)
 
     result = score_and_decide(tech, opt, short)
 
-    st.subheader(f"📊 {ticker} 股价走势（6 个月）")
+    st.subheader(f"📊 {ticker} 股價走勢（6 個月）")
     st.line_chart(tech["chart_df"], height=280)
 
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        st.markdown("### 📊 技术面")
-        st.metric("现价", tech["price"])
-        st.metric("RSI(14)", tech["rsi"], help=tech["rsi_signal"])
-        st.write(f"**RSI 状态**：{tech['rsi_signal']}")
-        st.write(f"**MACD 金叉 / 死叉**：{tech['macd_bullish_cross']} / {tech['macd_bearish_cross']}")
-        st.write(f"**价格 > MA20**：{tech['price_above_ma20']}")
-        st.write(f"**MA20 > MA50**：{tech['ma20_above_ma50']}")
-        st.write(f"**布林带位置**：{tech['bb_position']}（宽度 {tech['bb_width']}%）")
+        st.markdown("### 📊 技術面")
+        st.metric("現價", tech["price"])
+        st.metric("RSI(14)", tech["rsi"], help="14 日相對強弱指數：>70 超買，<30 超賣，30–70 中性")
+        st.caption(f"**RSI 判讀**：{tech['rsi_read']}")
+        st.write(f"**MACD 金叉**：{'✅ 是' if tech['macd_bullish_cross'] else '❌ 否'}")
+        st.write(f"**MACD 死叉**：{'✅ 是' if tech['macd_bearish_cross'] else '❌ 否'}")
+        st.write(f"**價格 > MA20**：{'✅ 是' if tech['price_above_ma20'] else '❌ 否'}")
+        st.write(f"**MA20 > MA50**：{'✅ 是' if tech['ma20_above_ma50'] else '❌ 否'}")
+        st.write(f"**布林帶位置**：`{tech['bb_position']}`（寬度 {tech['bb_width']}%）")
+        st.caption(f"**布林帶判讀**：{tech['bb_read']}")
         if tech["vol_ratio"] is not None:
             st.write(f"**成交量比（5日/20日）**：{tech['vol_ratio']}")
         if tech["atr_pct"] is not None:
-            st.write(f"**ATR 波动率**：{tech['atr_pct']}%")
+            st.write(f"**ATR 波動率**：{tech['atr_pct']}%")
         st.write(f"**距 20 日高 / 低**：{tech['dist_high20']}% / {tech['dist_low20']}%")
+        st.caption(f"**區間判讀**：{tech['range_read']}")
 
     with c2:
-        st.markdown("### 🎯 期权情绪")
+        st.markdown("### 🎯 期權情緒")
         if isinstance(opt, dict) and "error" not in opt:
-            st.metric("Put/Call 成交量比率", opt["volume_put_call_ratio"])
-            st.metric("Put/Call 持仓量比率", opt["oi_put_call_ratio"])
+            st.metric("Put/Call 成交量比率", opt["volume_put_call_ratio"], help="Put 成交量 ÷ Call 成交量。基數為 Call；<1 偏多，>1 偏空")
+            st.metric("Put/Call 持倉量比率", opt["oi_put_call_ratio"], help="Put 未平倉量 ÷ Call 未平倉量。基數為 Call；<1 偏多，>1 偏空")
             st.write(f"**Put / Call 成交量**：{opt['put_volume']} / {opt['call_volume']}")
-            st.write(f"**Put / Call 未平仓**：{opt['put_oi']} / {opt['call_oi']}")
-            st.write(f"**情绪判断**：`{opt['sentiment']}`")
+            st.write(f"**Put / Call 未平倉**：{opt['put_oi']} / {opt['call_oi']}")
+            st.write(f"**情緒判斷**：`{opt['sentiment']}`")
+            st.caption(f"**判讀**：{opt['sentiment_read']}")
             if opt.get("divergence"):
                 st.warning(f"⚠️ {opt['divergence']}")
             if opt.get("put_iv") is not None and opt.get("call_iv") is not None:
                 st.write(f"**Put IV / Call IV**：{opt['put_iv']}% / {opt['call_iv']}%")
                 if opt.get("iv_skew_pct") is not None:
                     st.write(f"**IV 偏斜**：{opt['iv_skew_pct']}%")
-                iv_df = pd.DataFrame({
-                    "IV": [opt["put_iv"], opt["call_iv"]],
-                }, index=["Put IV", "Call IV"])
+                    st.caption(f"**判讀**：{opt['iv_read']}")
+                iv_df = pd.DataFrame({"IV": [opt["put_iv"], opt["call_iv"]]}, index=["Put IV", "Call IV"])
                 st.bar_chart(iv_df, height=150)
             if opt.get("used_expiries"):
                 st.caption(f"已汇总到期日：{', '.join(opt['used_expiries'])}")
         else:
-            st.error(opt.get("error", "期权数据不可用"))
+            st.error(opt.get("error", "期權數據不可用"))
             if opt.get("raw_errors"):
-                with st.expander("详细错误"):
+                with st.expander("詳細錯誤"):
                     for e in opt["raw_errors"]:
                         st.text(e)
 
     with c3:
-        st.markdown("### 📉 沽空数据")
+        st.markdown("### 📉 沽空數據")
         if isinstance(short, dict) and "error" not in short:
             spf = short["short_pct_float"]
-            st.metric("Short % of Float", f"{spf}%" if spf is not None else "N/A")
+            st.metric("Short % of Float", f"{spf}%" if spf is not None else "N/A", help="空頭股數佔流通股比例")
             d2c = short["short_ratio_days_to_cover"]
-            st.metric("Days to Cover", d2c if d2c is not None else "N/A")
-            st.write(f"**空头持仓**：{short['shares_short']}")
-            st.write(f"**上期持仓**：{short['shares_short_prior']}")
-            st.write(f"**持仓上升 / 下降**：{short['short_interest_rising']} / {short['short_interest_falling']}")
-            if short.get("daily_short_volume_trend"):
-                st.write(f"**每日沽空量趋势**：{short['daily_short_volume_trend']}")
-            st.write(f"**信号**：`{', '.join(short['signals'])}`")
-            st.caption(f"数据源：{short.get('source')}")
+            st.metric("Days to Cover", d2c if d2c is not None else "N/A", help="空頭股數 ÷ 日均成交量，反映回補所需日數")
+            st.write(f"**空頭持倉**：{short['shares_short']}")
+            st.write(f"**上期持倉**：{short['shares_short_prior']}")
+            if short.get("short_change_pct") is not None:
+                st.write(f"**持倉變化**：{short['short_change_pct']}%")
+            st.caption(f"**判讀**：{short['change_read']}")
+            if short.get("daily_short_volume_read"):
+                st.write("**每日沽空量趨勢**")
+                st.caption(short["daily_short_volume_read"])
+            st.write("**信號**")
+            for sig in short["signals"]:
+                st.write(f"- {SIGNAL_ZH.get(sig, sig)}")
+            st.caption(f"數據源：{short.get('source')}")
             if short.get("note"):
                 st.info(short["note"])
         else:
-            st.error(short.get("error", "沽空数据不可用"))
+            st.error(short.get("error", "沽空數據不可用"))
 
     st.divider()
-    st.markdown("## 📈 综合分析结果")
+    st.markdown("## 📈 綜合分析結果")
 
     r1, r2, r3 = st.columns(3)
     with r1:
-        st.metric("🟢 买入概率", f"{result['buy_probability']}%")
+        st.metric("🟢 買入概率", f"{result['buy_probability']}%")
         st.progress(result["buy_probability"] / 100)
     with r2:
-        st.metric("🟡 卖出概率", f"{result['sell_probability']}%")
+        st.metric("🟡 賣出概率", f"{result['sell_probability']}%")
         st.progress(result["sell_probability"] / 100)
     with r3:
         st.metric("🔴 沽空概率", f"{result['short_probability']}%")
         st.progress(result["short_probability"] / 100)
 
     st.success(f"➡️ 概率最高方向：**{result['top_direction']}**")
-    st.caption(f"原始分数：{result['raw_scores']}")
+    st.caption(f"原始分數：{result['raw_scores']}")
 
     if result.get("details"):
-        st.markdown("### 🔍 信号明细")
+        st.markdown("### 🔍 信號明細")
         det_df = pd.DataFrame(
             result["details"],
-            columns=["维度", "信号", "买入加分", "卖出加分", "沽空加分"],
+            columns=["維度", "信號", "買入加分", "賣出加分", "沽空加分"],
         )
         st.dataframe(det_df, use_container_width=True, hide_index=True)
 
-    with st.expander("📋 查看完整数据（JSON）"):
+    with st.expander("📋 查看完整數據（JSON）"):
         st.json({
             "ticker": ticker,
             "technicals": {k: v for k, v in tech.items() if k != "chart_df"},
@@ -534,4 +601,4 @@ if submitted and ticker:
         })
 
 st.divider()
-st.caption("⚠️ 本工具仅供参考，不构成任何投资建议。期权及沽空数据可能延迟或不完整，实际交易前请自行核实。")
+st.caption("⚠️ 本工具僅供參考，不構成任何投資建議。期權及沽空數據可能延遲或不完整，實際交易前請自行核實。")
