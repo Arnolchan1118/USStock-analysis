@@ -1,0 +1,6 @@
+streamlit
+yfinance
+openbb
+xoomar
+pandas
+numpy
